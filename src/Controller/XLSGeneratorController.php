@@ -2,9 +2,15 @@
 
 namespace App\Controller;
 
+use App\Entity\Stock;
+use App\Service\ArticleManager;
+use App\Service\InstituteManager;
 use App\Service\StockManager;
+use Doctrine\ORM\EntityManagerInterface;
 use PhpOffice\PhpSpreadsheet\Exception;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+use PhpOffice\PhpSpreadsheet\Style\Font;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx as ExcelFile;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
@@ -18,26 +24,66 @@ class XLSGeneratorController extends AbstractController
     protected $stockManager;
 
     /**
+     * @var ArticleManager $articleManager
+     */
+    protected $articleManager;
+
+    /**
+     * @var InstituteManager $instituteManager
+     */
+    protected $instituteManager;
+
+    /**
+     * @var EntityManagerInterface $entityManager
+     */
+    protected $entityManager;
+
+    /**
      * XLSGeneratorController constructor.
      * @param StockManager $stockManager
+     * @param EntityManagerInterface $entityManager
+     * @param ArticleManager $articleManager
+     * @param InstituteManager $instituteManager
      */
-    public function __construct(StockManager $stockManager)
+    public function __construct(StockManager $stockManager, EntityManagerInterface $entityManager, ArticleManager $articleManager, InstituteManager $instituteManager)
     {
         $this->stockManager = $stockManager;
+        $this->entityManager = $entityManager;
+        $this->articleManager = $articleManager;
+        $this->instituteManager = $instituteManager;
     }
 
     /**
+     * Tries file generation and returns a status message
      * @Route("/xls-generator", name="xls-generator")
      */
     public function generateXLSFile()
     {
-        dump($this->createXLSFile());
-        return $this->render('xls_generator/index.html.twig');
+        $message = null;
+        $error = null;
+        $status = $this->createXLSFile();
+        switch($status)
+        {
+            case 2:
+                $message = "File created.";
+                break;
+
+            case 1:
+                $error = "This file is already opened. Please close it to create a new one.";
+                break;
+
+            default:
+                $error = "Something happened. No file created.";
+        }
+        return $this->render('xls_generator/index.html.twig', [
+            'message' => $message,
+            'error'   => $error
+        ]);
     }
 
     /**
      * Tries to create a basic XLS File
-     * @return bool
+     * @return integer
      */
     public function createXLSFile()
     {
@@ -45,12 +91,15 @@ class XLSGeneratorController extends AbstractController
         try
         {
             $filledSpreadsheet = $this->writeXLSFile($spreadsheet);
-            $this->saveXLSFile($filledSpreadsheet);
-            return true;
+            if(!$this->saveXLSFile($filledSpreadsheet))
+            {
+                return 1;
+            }
+            return 2;
         }
         catch(Exception $e)
         {
-            return false;
+            return 0;
         }
     }
 
@@ -74,8 +123,21 @@ class XLSGeneratorController extends AbstractController
      */
     public function fillXLSFile($sheet)
     {
-        $sheet = $this->writeHeader($sheet);
-        $sheet = $this->writeBody($sheet);
+        $unlinkedStocks = $this->stockManager->getAllStocks();
+
+        $stocks = $this->getGlobalStocks($unlinkedStocks);
+
+        $articleReferences = array();
+
+        foreach($stocks as $stock)
+        {
+            array_push($articleReferences, $stock["article"]->getReference());
+        }
+
+        $headerInfos = $this->writeHeader($sheet, $articleReferences);
+        $sheet = $headerInfos["sheet"];
+        $columnCounter = $headerInfos["columnCounter"];
+        $sheet = $this->writeBody($sheet, $stocks, $columnCounter);
 
         // $sheet->setCellValue('A2', 'Hello World !');
         return $sheet;
@@ -84,49 +146,174 @@ class XLSGeneratorController extends AbstractController
     /**
      * Writes file header with category name
      * @param $sheet
+     * @param $references
      * @return mixed
      */
-    public function writeHeader($sheet)
+    public function writeHeader($sheet, $references)
     {
+        // Header File
         $headerStyle = [
             'font' => [
-                'bold' => true
+                'bold' => true,
+                'size' => 10,
+                'color' => ['argb' => 'FF0000']
+            ],
+            'borders' => [
+                'outline' => [
+                    'borderStyle' => Border::BORDER_THIN,
+                    'color' => ['argb' => 'FF505050'],
+                ],
             ],
             'alignment' => [
                 'horizontal' => Alignment::HORIZONTAL_CENTER
             ]
         ];
 
-        $category = array( "Ndist", "Raison", "Demandeur", "Adress1", "Adress2", "Adress3", "CP", "Ville", "Tel" );
+        // Data labels
+        $categories = array( "Ndist", "Raison", "Demandeur", "Adress1", "Adress2", "Adress3", "CP", "Ville", "Tel" );
 
-        for($i = 1; $i < count($category); $i++)
+        // Merges Categories and References Arrays to create the header
+        $indexes = array_merge($categories, array_unique($references));
+
+        for($i = 0; $i < count($indexes); $i++)
         {
-            $columnName = $this->getColumnName($i);
-            $cellName = $columnName."1";
-            $sheet->setCellValue($cellName, $category[$i-1]);
-            $sheet->getStyle($cellName)->applyFromArray($headerStyle);
+            $columnName = $this->getColumnName($i+1);
+            $cellCoordinate = $columnName . "1";
+            $sheet->setCellValue($cellCoordinate, $indexes[$i]);
+            $sheet->getColumnDimension($columnName)->setAutoSize(true);
+            $sheet->getStyle($cellCoordinate)->applyFromArray($headerStyle);
+        }
+
+        return array(
+            'sheet' => $sheet,
+            'columnCounter' => count($indexes)
+        );
+    }
+
+    public function writeBody($sheet, $stocks, $columnCounter)
+    {
+        $bodyStyle = [
+            'font' => [
+                "size" => 10
+            ],
+            'alignment' => [
+                'horizontal' => Alignment::HORIZONTAL_CENTER
+            ]
+        ];
+
+
+        $currentLineIndex = 2;
+        foreach($stocks as $stock)
+        {
+            $data = $this->getStockData($stock);
+
+            for($i = 0; $i < 9; $i++) // Institute Data
+            {
+                $currentCellCoordinate = $this->getLetterByIndex($i+1) . ($currentLineIndex);
+                $sheet->setCellValue($currentCellCoordinate, $data[$i]);
+            }
+
+            for($i = 9; $i < $columnCounter; $i++)
+            {
+                $headerCellCoordinate = $this->getLetterByIndex(($i) + 1) . (1);
+                $headerCellValue = strval($this->getCellValue($sheet,  $headerCellCoordinate));
+
+                $currentCellCoordinate = $this->getLetterByIndex($i+1) . ($currentLineIndex);
+
+                $stockValue = $this->setStockByReference($stock, $headerCellValue);
+
+                $sheet->setCellValue($currentCellCoordinate, $stockValue);
+                $sheet->getStyle($currentCellCoordinate)->applyFromArray($bodyStyle);
+
+            }
+
+            $currentLineIndex++;
         }
 
         return $sheet;
     }
 
-    public function writeBody($sheet)
+    /**
+     * @param $stock
+     * @param $headerCellValue
+     * @return int
+     */
+    public function setStockByReference($stock, $headerCellValue)
     {
-        $stocks = $this->stockManager->getAllStocks();
-        // dump($stocks);
-        return $sheet;
+        return ($headerCellValue === $stock["article"]->getReference()) ? $stock["stock"] : 0;
+    }
+
+    /**
+     * @param $sheet
+     * @param $cellCoordinate
+     * @return string
+     */
+    public function getCellValue($sheet, $cellCoordinate)
+    {
+        return $sheet->getCell($cellCoordinate)->getValue();
     }
 
     /**
      * Saves the XLS File into the /public/xls/ dir
      * @param Spreadsheet $spreadsheet
-     * @throws \PhpOffice\PhpSpreadsheet\Writer\Exception
+     * @return string
      */
     public function saveXLSFile($spreadsheet)
     {
-        $writer = new ExcelFile($spreadsheet);
-        $writer->setPreCalculateFormulas(true);
-        $writer->save("xls/test.xlsx");
+        try
+        {
+            $writer = new ExcelFile($spreadsheet);
+            $writer->setPreCalculateFormulas(true);
+            $writer->save("xls/test.xlsx");
+            return true;
+        }
+        catch (\Exception $e)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * @param Stock array
+     * @return array
+     */
+    public function getGlobalStocks($stocks)
+    {
+        $globalStocks = array();
+
+        foreach($stocks as $stock)
+        {
+            $articleId = $stock->getArticleId();
+            $instituteId = $stock->getInsituteId();
+
+            $article = $this->articleManager->getArticleById($articleId);
+            $institute = $this->instituteManager->getInstituteById($instituteId);
+
+            array_push($globalStocks, array("article" => $article, "institute" => $institute, "stock" => $stock->getStock()));
+        }
+
+        return $globalStocks;
+    }
+
+    /**
+     * @param Stock $stock
+     * @return array
+     */
+    public function getStockData($stock)
+    {
+        return array(
+            $stock["institute"]->getName(),
+            $stock["institute"]->getReason(),
+            $stock["institute"]->getReceiver(),
+            $stock["institute"]->getAddress1(),
+            $stock["institute"]->getAddress2(),
+            $stock["institute"]->getAddress3(),
+            $stock["institute"]->getPostCode(),
+            $stock["institute"]->getCity(),
+            $stock["institute"]->getPhoneNumber(),
+            $stock["article"]->getReference(),
+            $stock["stock"]
+        );
     }
 
     /**
@@ -154,7 +341,6 @@ class XLSGeneratorController extends AbstractController
             "second" => false,
             "first"  => false
         );
-
 
         // Find column name pattern (1, 2 or 3 letters)
         while(702 < $columnNumber && $columnNumber <= 17576)

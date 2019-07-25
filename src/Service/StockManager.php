@@ -23,13 +23,17 @@ class StockManager
         $this->entityManager =  $entityManager;
     }
 
+    /**
+     * @return Stock[]|object[]
+     */
     public function getAllStocks()
     {
         // Gets Stocks Repository
         $stocksRepository = $this->entityManager->getRepository(Stock::class);
 
-        // Gets all stocks
-        return $stocksRepository->findAll();
+        $stocks = $stocksRepository->findAll();
+
+        return $stocks;
     }
 
 }

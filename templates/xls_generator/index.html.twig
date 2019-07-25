@@ -4,4 +4,14 @@
 
 {% block body %}
     <h1> My first XLS ! </h1>
+
+    <p>
+        {% if message is defined%}
+            {{ message }}
+        {% endif %}
+
+        {% if error is defined%}
+            <b> {{  error }}</b>
+        {% endif %}
+    </p>
 {% endblock %}

@@ -23,11 +23,15 @@ class Stock
 
     /**
      * @ORM\Column(type="integer")
+     * @ORM\ManyToMany(targetEntity="Institute")
+     * @ORM\JoinColumn(name="institute_id", referencedColumnName="id")
      */
     private $article_id;
 
     /**
      * @ORM\Column(type="integer")
+     * @ORM\ManyToMany(targetEntity="Article")
+     * @ORM\JoinColumn(name="article_id", referencedColumnName="id")
      */
     private $stock;
 
